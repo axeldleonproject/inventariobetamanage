@@ -572,6 +572,7 @@
     </div>
     <div class="header-actions">
       <button class="btn primary" id="installBtn" style="display:none;">⬇ Instalar app</button>
+      <button class="btn accent" id="nuevoRepuestoBtn">+ Nuevo repuesto</button>
       <button class="btn accent" id="salidaBtn">↓ Registrar salida</button>
       <button class="btn" id="historialBtn">📊 Dashboard</button>
       <div class="save-indicator" id="saveIndicator"><span class="dot"></span> Guardado</div>
@@ -628,6 +629,62 @@
   <span id="footerCount">689 artículos consolidados de BACKUPMACROSINVENTARIOMA.csv</span>
   <span>Valores en balboas (B/.)</span>
 </footer>
+
+<!-- ===== MODAL: Nuevo repuesto ===== -->
+<div class="modal-overlay" id="nuevoRepuestoOverlay">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <h2>Nuevo repuesto</h2>
+      <button class="modal-close" id="nuevoRepuestoClose">✕</button>
+    </div>
+
+    <div class="form-grid">
+      <div class="form-field">
+        <label>Hoja origen</label>
+        <input type="text" id="fNuevoHoja" placeholder="Ej. PCBA">
+      </div>
+      <div class="form-field">
+        <label>P/N *</label>
+        <input type="text" id="fNuevoPN" placeholder="Número de parte" required>
+      </div>
+      <div class="form-field full">
+        <label>Descripción *</label>
+        <input type="text" id="fNuevoDesc" placeholder="Descripción del repuesto" required>
+      </div>
+      <div class="form-field">
+        <label>Ubicación</label>
+        <input type="text" id="fNuevoUbicacion" placeholder="Ej. Estante A-3">
+      </div>
+      <div class="form-field">
+        <label>Unidad</label>
+        <input type="text" id="fNuevoUnit" placeholder="PCS, BOX, M…" value="PCS">
+      </div>
+      <div class="form-field">
+        <label>Cantidad registrada</label>
+        <input type="number" id="fNuevoQty" min="0" step="1" value="0">
+      </div>
+      <div class="form-field">
+        <label>En stock (físico)</label>
+        <input type="number" id="fNuevoEnStock" min="0" step="1" value="0">
+      </div>
+      <div class="form-field">
+        <label>Precio unitario (B/.)</label>
+        <input type="number" id="fNuevoUprice" min="0" step="0.01" value="0">
+      </div>
+      <div class="form-field">
+        <label>Último conteo</label>
+        <input type="date" id="fNuevoUltimoConteo">
+      </div>
+    </div>
+
+    <div class="form-error" id="nuevoRepuestoError"></div>
+
+    <div class="modal-footer">
+      <button class="btn" id="nuevoRepuestoCancelBtn">Cancelar</button>
+      <button class="btn accent" id="nuevoRepuestoSubmitBtn">Agregar repuesto</button>
+    </div>
+  </div>
+</div>
 
 <!-- ===== MODAL: Registrar salida ===== -->
 <div class="modal-overlay" id="salidaOverlay">
@@ -992,6 +1049,7 @@ function closeModal(overlay){ overlay.classList.remove('open'); document.body.st
 
 const salidaOverlay = document.getElementById('salidaOverlay');
 const historialOverlay = document.getElementById('historialOverlay');
+const nuevoRepuestoOverlay = document.getElementById('nuevoRepuestoOverlay');
 
 function resetSalidaForm(){
   document.getElementById('fSalidaFecha').value = todayISO();
@@ -1727,6 +1785,85 @@ document.getElementById('addRowBtn').addEventListener('click', ()=>{
   document.getElementById('searchInput').value='';
   editedId = item.id;
   renderTable();
+});
+
+/* ============ MODAL: NUEVO REPUESTO ============ */
+function resetNuevoRepuestoForm(){
+  document.getElementById('fNuevoHoja').value = '';
+  document.getElementById('fNuevoPN').value = '';
+  document.getElementById('fNuevoDesc').value = '';
+  document.getElementById('fNuevoUbicacion').value = '';
+  document.getElementById('fNuevoUnit').value = 'PCS';
+  document.getElementById('fNuevoQty').value = 0;
+  document.getElementById('fNuevoEnStock').value = 0;
+  document.getElementById('fNuevoUprice').value = 0;
+  document.getElementById('fNuevoUltimoConteo').value = todayISO();
+  hideNuevoRepuestoError();
+}
+function showNuevoRepuestoError(msg){
+  const el = document.getElementById('nuevoRepuestoError');
+  el.textContent = msg; el.classList.add('show');
+}
+function hideNuevoRepuestoError(){
+  const el = document.getElementById('nuevoRepuestoError');
+  el.textContent = ''; el.classList.remove('show');
+}
+
+document.getElementById('nuevoRepuestoBtn').addEventListener('click', ()=>{
+  resetNuevoRepuestoForm();
+  openModal(nuevoRepuestoOverlay);
+  setTimeout(()=> document.getElementById('fNuevoPN').focus(), 50);
+});
+document.getElementById('nuevoRepuestoClose').addEventListener('click', ()=> closeModal(nuevoRepuestoOverlay));
+document.getElementById('nuevoRepuestoCancelBtn').addEventListener('click', ()=> closeModal(nuevoRepuestoOverlay));
+nuevoRepuestoOverlay.addEventListener('click', e=>{ if(e.target === nuevoRepuestoOverlay) closeModal(nuevoRepuestoOverlay); });
+
+document.getElementById('nuevoRepuestoSubmitBtn').addEventListener('click', async ()=>{
+  const pn = document.getElementById('fNuevoPN').value.trim();
+  const desc = document.getElementById('fNuevoDesc').value.trim();
+  if(!pn){ showNuevoRepuestoError('El P/N es obligatorio.'); return; }
+  if(!desc){ showNuevoRepuestoError('La descripción es obligatoria.'); return; }
+
+  const duplicado = data.some(d => (d.pn||'').trim().toLowerCase() === pn.toLowerCase());
+  if(duplicado && !confirm(`Ya existe un repuesto con el P/N "${pn}". ¿Deseas agregarlo de todas formas como un artículo nuevo?`)){
+    return;
+  }
+  hideNuevoRepuestoError();
+
+  const item = {
+    id: nextId++,
+    hoja: document.getElementById('fNuevoHoja').value.trim(),
+    pn: pn,
+    desc: desc,
+    ubicacion: document.getElementById('fNuevoUbicacion').value.trim(),
+    unit: document.getElementById('fNuevoUnit').value.trim() || 'PCS',
+    qty: Number(document.getElementById('fNuevoQty').value) || 0,
+    uprice: Number(document.getElementById('fNuevoUprice').value) || 0,
+    amount: 0,
+    enstock: Number(document.getElementById('fNuevoEnStock').value) || 0,
+    costo_total: 0,
+    ultimo_conteo: document.getElementById('fNuevoUltimoConteo').value || '',
+    estado: '',
+    estadoNorm: ''
+  };
+  recalc(item);
+
+  data.unshift(item);
+  const submitBtn = document.getElementById('nuevoRepuestoSubmitBtn');
+  submitBtn.disabled = true;
+  try{
+    await upsertItemRemote(item);
+  } finally {
+    submitBtn.disabled = false;
+  }
+
+  renderStats();
+  renderFilterOptions();
+  state.search=''; state.hoja=''; state.ubic=''; state.status='';
+  document.getElementById('searchInput').value='';
+  editedId = item.id;
+  renderTable();
+  closeModal(nuevoRepuestoOverlay);
 });
 
 /* ============ EXPORTAR CSV ============ */
