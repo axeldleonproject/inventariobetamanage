@@ -494,6 +494,15 @@
   .auth-pending h2{ font-family: var(--display); font-size:18px; margin-bottom:8px; }
   .auth-pending p{ font-size:13px; color: var(--text-muted); line-height:1.5; margin-bottom:18px; }
   #appRoot.hidden{ display:none; }
+
+  /* ================= PERMISOS: solo admin puede editar/borrar inventario ================= */
+  body:not(.is-admin) .editable{ cursor:default; }
+  body:not(.is-admin) .editable:hover{ background:none; box-shadow:none; }
+  body:not(.is-admin) .editable:hover::after{ display:none; }
+  body:not(.is-admin) .status-badge{ cursor:default; }
+  body:not(.is-admin) .del-btn{ display:none; }
+  body:not(.is-admin) .add-row-btn{ display:none; }
+  body:not(.is-admin) #nuevoRepuestoBtn{ display:none; }
 </style>
 </head>
 <body>
@@ -597,7 +606,7 @@
 
 <div class="edit-hint">
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9a917c" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
-  Haz clic en cantidad, precio, ubicación o estado para editar en vivo. Los cambios se guardan automáticamente en este navegador.
+  <span id="editHintText">Haz clic en cantidad, precio, ubicación o estado para editar en vivo. Los cambios se guardan automáticamente en Supabase.</span>
 </div>
 
 <div class="table-wrap">
@@ -867,16 +876,32 @@ sb.auth.onAuthStateChange((event)=>{
   }
 });
 
-// Consulta la tabla "profiles" para saber si el usuario ya fue aprobado por un administrador.
-async function isUserApproved(userId){
-  const { data: profile, error } = await sb.from('profiles').select('approved').eq('id', userId).single();
-  if(error){ console.error(error); return false; }
-  return !!(profile && profile.approved);
+// Consulta la tabla "profiles" para saber si el usuario ya fue aprobado y si es administrador.
+let isAdmin = false;
+
+async function fetchProfile(userId){
+  const { data: profile, error } = await sb.from('profiles').select('approved, is_admin').eq('id', userId).single();
+  if(error){ console.error(error); return null; }
+  return profile;
+}
+
+function applyRolePermissions(){
+  document.body.classList.toggle('is-admin', isAdmin);
+  const nuevoBtn = document.getElementById('nuevoRepuestoBtn');
+  if(nuevoBtn) nuevoBtn.style.display = isAdmin ? '' : 'none';
+  const hint = document.getElementById('editHintText');
+  if(hint){
+    hint.textContent = isAdmin
+      ? 'Haz clic en cantidad, precio, ubicación o estado para editar en vivo. Los cambios se guardan automáticamente en Supabase.'
+      : 'Vista de solo lectura. Para descontar un repuesto usa "Registrar salida"; la edición directa del inventario está reservada a administradores.';
+  }
 }
 
 async function handlePostAuth(user){
   if(!user) return;
-  const approved = await isUserApproved(user.id);
+  const profile = await fetchProfile(user.id);
+  const approved = !!(profile && profile.approved);
+  isAdmin = !!(profile && profile.is_admin);
   if(!approved){
     authPanelLoginRegister.style.display = 'none';
     authPanelPending.style.display = '';
@@ -884,6 +909,7 @@ async function handlePostAuth(user){
     showAuthOverlay();
     return;
   }
+  applyRolePermissions();
   hideAuthOverlay();
   await initApp();
 }
@@ -1012,25 +1038,24 @@ async function fetchSalidasRemote(){
   }));
 }
 
+// Llama a la función de Supabase "registrar_salida" (RPC), que crea la salida
+// y descuenta el stock en una sola operación segura del lado del servidor.
+// Así, un usuario aprobado (no-admin) puede registrar salidas sin tener permiso
+// para hacer UPDATE directo sobre la tabla "inventario".
 async function insertSalidaRemote(nuevaSalida){
-  const { data: inserted, error } = await sb.from('salidas').insert({
-    folio: nuevaSalida.folio,
-    fecha: nuevaSalida.fecha,
-    cliente: nuevaSalida.cliente,
-    serie: nuevaSalida.serie,
-    tecnico: nuevaSalida.tecnico,
-    registrador: nuevaSalida.registrador,
-    razon: nuevaSalida.razon
-  }).select().single();
+  const { data: result, error } = await sb.rpc('registrar_salida', {
+    p_fecha: nuevaSalida.fecha,
+    p_cliente: nuevaSalida.cliente,
+    p_serie: nuevaSalida.serie,
+    p_tecnico: nuevaSalida.tecnico,
+    p_registrador: nuevaSalida.registrador,
+    p_razon: nuevaSalida.razon,
+    p_items: nuevaSalida.items.map(it => ({ pn: it.pn, desc: it.desc, qty: it.qty, uprice: it.uprice }))
+  });
   if(error){ showSbError(error.message); return null; }
-
-  const itemsRows = nuevaSalida.items.map(it => ({
-    salida_id: inserted.id, pn: it.pn, descripcion: it.desc, qty: it.qty, uprice: it.uprice
-  }));
-  const { error: itemsError } = await sb.from('salida_items').insert(itemsRows);
-  if(itemsError){ showSbError(itemsError.message); return null; }
-
-  return inserted.id;
+  const row = Array.isArray(result) ? result[0] : result;
+  if(row && row.folio) nuevaSalida.folio = row.folio;
+  return row ? row.salida_id : null;
 }
 
 let salidas = [];
@@ -1217,7 +1242,22 @@ document.getElementById('salidaSubmitBtn').addEventListener('click', async ()=>{
   submitBtn.textContent = 'Guardando…';
 
   try{
-    // Descontar del inventario (localmente)
+    // Registrar la salida en el servidor: la función RPC valida el stock,
+    // crea la salida y descuenta el inventario de forma atómica y segura.
+    const nuevaSalida = {
+      folio: '', // el servidor genera el folio real
+      fecha, cliente, serie, tecnico, registrador, razon,
+      items: pickedList.map(p=>({pn:p.pn, desc:p.desc, qty:p.qty, uprice:p.uprice}))
+    };
+    const insertedId = await insertSalidaRemote(nuevaSalida);
+    if(insertedId === null){
+      showSalidaError('No se pudo guardar la salida en el servidor. Verifica el stock disponible e intenta de nuevo.');
+      return;
+    }
+    nuevaSalida.id = insertedId;
+    salidas.unshift(nuevaSalida);
+
+    // Reflejar localmente el descuento que el servidor ya aplicó en "inventario"
     const affectedItems = [];
     pickedList.forEach(p=>{
       const item = data.find(d=>d.id===p.id);
@@ -1227,23 +1267,6 @@ document.getElementById('salidaSubmitBtn').addEventListener('click', async ()=>{
         affectedItems.push(item);
       }
     });
-
-    // Guardar movimiento en Supabase
-    const nuevaSalida = {
-      folio: 'S-' + String(salidas.length + 1).padStart(5, '0'),
-      fecha, cliente, serie, tecnico, registrador, razon,
-      items: pickedList.map(p=>({pn:p.pn, desc:p.desc, qty:p.qty, uprice:p.uprice}))
-    };
-    const insertedId = await insertSalidaRemote(nuevaSalida);
-    if(insertedId === null){
-      showSalidaError('No se pudo guardar la salida en el servidor. Intenta de nuevo.');
-      return;
-    }
-    nuevaSalida.id = insertedId;
-    salidas.unshift(nuevaSalida);
-
-    // Guardar el descuento de inventario en Supabase
-    await upsertItemsRemote(affectedItems);
 
     renderStats();
     renderFilterOptions();
@@ -1739,6 +1762,7 @@ function cycleStatus(badge){
 }
 
 document.getElementById('tableBody').addEventListener('click', e=>{
+  if(!isAdmin) return; // solo un administrador puede editar, borrar o cambiar el estado directamente
   const delBtn = e.target.closest('.del-btn');
   if(delBtn){
     const id = Number(delBtn.dataset.id);
@@ -1761,6 +1785,7 @@ document.getElementById('tableBody').addEventListener('click', e=>{
 
 /* ============ AGREGAR ARTÍCULO ============ */
 document.getElementById('addRowBtn').addEventListener('click', ()=>{
+  if(!isAdmin) return; // solo un administrador puede agregar artículos directamente a la tabla
   const item = {
     id: nextId++,
     hoja: '',
@@ -1810,6 +1835,7 @@ function hideNuevoRepuestoError(){
 }
 
 document.getElementById('nuevoRepuestoBtn').addEventListener('click', ()=>{
+  if(!isAdmin) return; // solo un administrador puede crear repuestos directamente
   resetNuevoRepuestoForm();
   openModal(nuevoRepuestoOverlay);
   setTimeout(()=> document.getElementById('fNuevoPN').focus(), 50);
@@ -1819,6 +1845,7 @@ document.getElementById('nuevoRepuestoCancelBtn').addEventListener('click', ()=>
 nuevoRepuestoOverlay.addEventListener('click', e=>{ if(e.target === nuevoRepuestoOverlay) closeModal(nuevoRepuestoOverlay); });
 
 document.getElementById('nuevoRepuestoSubmitBtn').addEventListener('click', async ()=>{
+  if(!isAdmin) return; // solo un administrador puede crear repuestos directamente
   const pn = document.getElementById('fNuevoPN').value.trim();
   const desc = document.getElementById('fNuevoDesc').value.trim();
   if(!pn){ showNuevoRepuestoError('El P/N es obligatorio.'); return; }
