@@ -745,6 +745,7 @@
       </div>
     </div>
     <div class="header-actions">
+      <select id="orgViewSelect" style="display:none;"></select>
       <button class="btn primary" id="installBtn" style="display:none;">⬇ Instalar app</button>
       <button class="btn accent" id="nuevoRepuestoBtn">+ Nuevo repuesto</button>
       <button class="btn accent" id="salidaBtn">↓ Registrar salida</button>
@@ -1068,8 +1069,12 @@ registerForm.addEventListener('submit', async e=>{
   // en ese caso, la organización se le pedirá al iniciar sesión por primera vez.
   if(!signUpData.session){
     btn.disabled = false;
+    authTabLogin.classList.add('active'); authTabRegister.classList.remove('active');
+    loginForm.style.display=''; registerForm.style.display='none';
+    document.getElementById('authFormEyebrow').textContent = 'Bienvenido de nuevo';
+    document.getElementById('authFormTitle').textContent = 'Inicia sesión en tu cuenta';
     setAuthMsg('Cuenta creada. Revisa tu correo para confirmarlo (si aplica) y luego inicia sesión una vez que un administrador apruebe tu acceso.', 'success');
-    authTabLogin.click();
+    registerForm.reset();
     return;
   }
   const { orgId, error: orgError } = await resolveOrgId(orgSelectValue, orgNewName);
@@ -1133,6 +1138,7 @@ let isAdmin = false;
 let isStockManager = false;
 let isSuperAdmin = false;
 let currentOrgId = null;
+let selectedViewOrgId = null; // solo relevante para superadmin: null = "todas"
 
 async function fetchProfile(userId){
   const { data: profile, error } = await sb.from('profiles').select('approved, is_admin, is_stock_manager, is_super_admin, org_id').eq('id', userId).single();
@@ -1152,7 +1158,37 @@ function applyRolePermissions(){
       ? 'Haz clic en cantidad, precio, ubicación o estado para editar en vivo. Los cambios se guardan automáticamente en Supabase.'
       : 'Vista de solo lectura. Para descontar un repuesto usa "Registrar salida"; la edición directa del inventario está reservada a administradores.';
   }
+  if(isSuperAdmin) setupOrgViewSelect();
 }
+
+// Selector de organización visible solo para superadmin: permite ver
+// el inventario consolidado ("Todas las organizaciones") o filtrar por una sola.
+async function setupOrgViewSelect(){
+  const sel = document.getElementById('orgViewSelect');
+  if(!sel) return;
+  sel.style.display = '';
+  const orgs = await fetchOrganizations();
+  const opts = orgs.map(o=>`<option value="${o.id}">${escapeHtml(o.name)}</option>`).join('');
+  sel.innerHTML = '<option value="">— Todas las organizaciones —</option>' + opts;
+  sel.value = selectedViewOrgId || '';
+  sel.onchange = async ()=>{
+    selectedViewOrgId = sel.value || null;
+    showSbLoading(true);
+    try{
+      const [inv, sal] = await Promise.all([fetchInventarioRemote(), fetchSalidasRemote()]);
+      data = inv.map(d => ({...d, estadoNorm: normStatus(d.estado)}));
+      nextId = data.length ? Math.max(...data.map(d=>d.id||0)) + 1 : 1;
+      salidas = sal;
+    } finally {
+      showSbLoading(false);
+    }
+    renderStats();
+    renderFilterOptions();
+    renderTable();
+    updateOrgSubtitle();
+  };
+}
+
 
 async function handlePostAuth(user){
   if(!user) return;
@@ -1206,11 +1242,29 @@ function showSbError(msg){
 }
 
 /* ---- Inventario: lectura/escritura remota ---- */
+// Devuelve el org_id a usar como filtro de lectura, o null si no hay que filtrar
+// (caso: superadmin viendo "Todas las organizaciones").
+function effectiveOrgFilter(){
+  if(isSuperAdmin) return selectedViewOrgId; // null = sin filtro (todas)
+  return currentOrgId;
+}
+
+// Devuelve el org_id a usar al CREAR un registro nuevo (siempre debe ser concreto,
+// nunca null): la org que el superadmin tenga seleccionada, o si eligió "todas",
+// su propia organización por defecto.
+function effectiveOrgForWrite(){
+  if(isSuperAdmin) return selectedViewOrgId || currentOrgId;
+  return currentOrgId;
+}
+
 async function fetchInventarioRemote(){
-  const { data: rows, error } = await sb.from('inventario').select('*').order('id', { ascending: true });
+  let query = sb.from('inventario').select('*').order('id', { ascending: true });
+  const orgFilter = effectiveOrgFilter();
+  if(orgFilter) query = query.eq('org_id', orgFilter);
+  const { data: rows, error } = await query;
   if(error){ showSbError(error.message); return []; }
   return (rows||[]).map(r => ({
-    id: r.id, hoja: r.hoja || '', pn: r.pn || '', desc: r.descripcion || '',
+    id: r.id, org_id: r.org_id, hoja: r.hoja || '', pn: r.pn || '', desc: r.descripcion || '',
     ubicacion: r.ubicacion || '', unit: r.unit || '',
     qty: Number(r.qty)||0, uprice: Number(r.uprice)||0, amount: Number(r.amount)||0,
     enstock: Number(r.enstock)||0, costo_total: Number(r.costo_total)||0,
@@ -1220,7 +1274,7 @@ async function fetchInventarioRemote(){
 
 function itemToRow(item){
   return {
-    id: item.id, hoja: item.hoja, pn: item.pn, descripcion: item.desc,
+    id: item.id, org_id: item.org_id || effectiveOrgForWrite(), hoja: item.hoja, pn: item.pn, descripcion: item.desc,
     ubicacion: item.ubicacion, unit: item.unit, qty: item.qty, uprice: item.uprice,
     amount: item.amount, enstock: item.enstock, costo_total: item.costo_total,
     ultimo_conteo: item.ultimo_conteo, estado: item.estado
@@ -1246,7 +1300,9 @@ async function upsertItemsRemote(items){
 
 async function deleteItemRemote(id){
   try{
-    const { error } = await sb.from('inventario').delete().eq('id', id);
+    let query = sb.from('inventario').delete().eq('id', id);
+    if(!isSuperAdmin) query = query.eq('org_id', currentOrgId);
+    const { error } = await query;
     if(error){ showSbError(error.message); return; }
     flashSaved();
   }catch(e){ showSbError(e.message||String(e)); }
@@ -1294,10 +1350,10 @@ function recalc(item){
 
 /* ============ SALIDAS DE INVENTARIO ============ */
 async function fetchSalidasRemote(){
-  const { data: rows, error } = await sb
-    .from('salidas')
-    .select('*, salida_items(*)')
-    .order('created_at', { ascending: false });
+  let query = sb.from('salidas').select('*, salida_items(*)').order('created_at', { ascending: false });
+  const orgFilter = effectiveOrgFilter();
+  if(orgFilter) query = query.eq('org_id', orgFilter);
+  const { data: rows, error } = await query;
   if(error){ showSbError(error.message); return []; }
   return (rows||[]).map(r => ({
     id: r.id,
@@ -2098,6 +2154,7 @@ document.getElementById('addRowBtn').addEventListener('click', ()=>{
   if(!isAdmin) return; // solo un administrador puede agregar artículos directamente a la tabla
   const item = {
     id: nextId++,
+    org_id: effectiveOrgForWrite(),
     hoja: '',
     pn: 'NUEVO-PN',
     desc: 'Nueva descripción',
@@ -2169,6 +2226,7 @@ document.getElementById('nuevoRepuestoSubmitBtn').addEventListener('click', asyn
 
   const item = {
     id: nextId++,
+    org_id: effectiveOrgForWrite(),
     hoja: document.getElementById('fNuevoHoja').value.trim(),
     pn: pn,
     desc: desc,
@@ -2319,7 +2377,17 @@ async function initApp(){
 
 async function updateOrgSubtitle(){
   const el = document.querySelector('.subtitle');
-  if(!el || !currentOrgId) return;
+  if(!el) return;
+  if(isSuperAdmin){
+    if(!selectedViewOrgId){
+      el.textContent = 'CONSOLIDADO · PCBA & COMPONENTES · TODAS LAS ORGANIZACIONES';
+      return;
+    }
+    const { data: org } = await sb.from('organizations').select('name').eq('id', selectedViewOrgId).single();
+    el.textContent = `CONSOLIDADO · PCBA & COMPONENTES · ${org?.name?.toUpperCase() || ''}`;
+    return;
+  }
+  if(!currentOrgId) return;
   const { data: org } = await sb.from('organizations').select('name').eq('id', currentOrgId).single();
   if(org && org.name){
     el.textContent = `CONSOLIDADO · PCBA & COMPONENTES · ${org.name.toUpperCase()}`;
