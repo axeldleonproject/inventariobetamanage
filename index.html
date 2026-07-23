@@ -1440,7 +1440,8 @@ async function insertSalidaRemote(nuevaSalida){
     p_tecnico: nuevaSalida.tecnico,
     p_registrador: nuevaSalida.registrador,
     p_razon: nuevaSalida.razon,
-    p_items: nuevaSalida.items.map(it => ({ pn: it.pn, desc: it.desc, qty: it.qty, uprice: it.uprice }))
+    p_items: nuevaSalida.items.map(it => ({ pn: it.pn, desc: it.desc, qty: it.qty, uprice: it.uprice })),
+    p_org_id: effectiveOrgForWrite()
   });
   if(error){ showSbError(error.message); return null; }
   const row = Array.isArray(result) ? result[0] : result;
