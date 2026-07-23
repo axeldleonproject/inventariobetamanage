@@ -105,6 +105,21 @@
   .btn.danger{ color: var(--red); }
   .btn.danger:hover{ border-color: var(--red); color: var(--red); background: var(--red-dim); }
 
+  .export-menu-wrap{ position:relative; display:inline-flex; }
+  .export-menu{
+    position:absolute; top:calc(100% + 6px); right:0; background: var(--surface);
+    border:1px solid var(--border-light); border-radius:10px; box-shadow: var(--shadow-lg);
+    min-width:200px; z-index:30; display:none; overflow:hidden; padding:5px;
+  }
+  .export-menu.open{ display:block; }
+  .export-menu button{
+    display:flex; width:100%; align-items:center; gap:9px; padding:10px 12px; background:none;
+    border:none; border-radius:7px; text-align:left; font-family: var(--body); font-size:13px;
+    color:var(--text); cursor:pointer; transition: background .12s;
+  }
+  .export-menu button:hover{ background: var(--surface-hover); }
+  .export-menu .export-menu-icon{ font-size:15px; width:18px; text-align:center; flex-shrink:0; }
+
   .save-indicator{
     font-family: var(--mono); font-size:11px; color: var(--text-dim);
     display:flex; align-items:center; gap:6px; opacity:0; transition: opacity .3s;
@@ -751,7 +766,14 @@
       <button class="btn accent" id="salidaBtn">↓ Registrar salida</button>
       <button class="btn" id="historialBtn">📊 Dashboard</button>
       <div class="save-indicator" id="saveIndicator"><span class="dot"></span> Guardado</div>
-      <button class="btn" id="exportBtn">⬇ Exportar CSV</button>
+      <div class="export-menu-wrap">
+        <button class="btn" id="exportBtn">⬇ Exportar ▾</button>
+        <div class="export-menu" id="exportMenu">
+          <button id="exportCsvBtn"><span class="export-menu-icon">📄</span> CSV</button>
+          <button id="exportExcelBtn"><span class="export-menu-icon">📊</span> Excel (.xlsx)</button>
+          <button id="exportPdfBtn"><span class="export-menu-icon">🧾</span> PDF</button>
+        </div>
+      </div>
       <button class="btn" id="logoutBtn">⎋ Cerrar sesión</button>
     </div>
   </div>
@@ -946,7 +968,14 @@
     <div class="history-list" id="historyList"></div>
 
     <div class="modal-footer">
-      <button class="btn" id="historyExportBtn">⬇ Exportar historial CSV</button>
+      <div class="export-menu-wrap">
+        <button class="btn" id="historyExportBtn">⬇ Exportar historial ▾</button>
+        <div class="export-menu" id="historyExportMenu">
+          <button id="historyExportCsvBtn"><span class="export-menu-icon">📄</span> CSV</button>
+          <button id="historyExportExcelBtn"><span class="export-menu-icon">📊</span> Excel (.xlsx)</button>
+          <button id="historyExportPdfBtn"><span class="export-menu-icon">🧾</span> PDF</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -954,6 +983,10 @@
 </div><!-- /#appRoot -->
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<!-- Librerías para exportar a Excel y PDF -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
 <script>
 /* ============ LOGO (BETA Cash Technology) ============ */
 const LOGO_IMG = new Image();
@@ -1130,6 +1163,18 @@ sb.auth.onAuthStateChange((event)=>{
     authPanelChooseOrg.style.display = 'none';
     loginForm.reset(); registerForm.reset();
     clearAuthMsg();
+
+    // Limpiar por completo el estado de rol/organización del usuario anterior:
+    // si otra persona inicia sesión después en la misma pestaña, no debe heredar
+    // permisos de superadmin ni ver el selector de organización.
+    isAdmin = false;
+    isStockManager = false;
+    isSuperAdmin = false;
+    currentOrgId = null;
+    selectedViewOrgId = null;
+    document.body.classList.remove('is-admin','is-stock-manager','is-super-admin');
+    const sel = document.getElementById('orgViewSelect');
+    if(sel){ sel.style.display = 'none'; sel.innerHTML = ''; sel.onchange = null; }
   }
 });
 
@@ -1158,7 +1203,19 @@ function applyRolePermissions(){
       ? 'Haz clic en cantidad, precio, ubicación o estado para editar en vivo. Los cambios se guardan automáticamente en Supabase.'
       : 'Vista de solo lectura. Para descontar un repuesto usa "Registrar salida"; la edición directa del inventario está reservada a administradores.';
   }
-  if(isSuperAdmin) setupOrgViewSelect();
+  if(isSuperAdmin){
+    setupOrgViewSelect();
+  } else {
+    // Usuarios normales (no superadmin) NUNCA deben ver el selector de organización:
+    // solo tienen acceso a la organización con la que fueron aprobados al registrarse.
+    const sel = document.getElementById('orgViewSelect');
+    if(sel){
+      sel.style.display = 'none';
+      sel.innerHTML = '';
+      sel.onchange = null;
+    }
+    selectedViewOrgId = null;
+  }
 }
 
 // Selector de organización visible solo para superadmin: permite ver
@@ -1898,24 +1955,77 @@ function renderDashboard(){
   }).join('');
 }
 
-document.getElementById('historyExportBtn').addEventListener('click', ()=>{
-  const headers = ['Fecha','Cliente','Serie Equipo','Técnico','Registrado por','Razón','P/N','Descripción','Cantidad','SAP'];
-  const lines = [headers.join(';')];
+/* ============ EXPORTAR SALIDAS: CSV / EXCEL / PDF ============ */
+const SAL_HEADERS = ['Fecha','Cliente','Serie Equipo','Técnico','Registrado por','Razón','P/N','Descripción','Cantidad','SAP'];
+
+function salRows(){
+  const rows = [];
   salidas.forEach(s=>{
     s.items.forEach(it=>{
-      const row = [s.fecha, s.cliente, s.serie, s.tecnico, s.registrador, s.razon, it.pn, it.desc, it.qty, s.sapDescontado ? 'Sí' : 'No']
-        .map(v => String(v??'').replace(/;/g,','));
-      lines.push(row.join(';'));
+      rows.push([s.fecha, s.cliente, s.serie, s.tecnico, s.registrador, s.razon, it.pn, it.desc, it.qty, s.sapDescontado ? 'Sí' : 'No']);
     });
+  });
+  return rows;
+}
+
+function nombreArchivoSalidas(ext){
+  return `salidas_BETA_${new Date().toISOString().slice(0,10)}.${ext}`;
+}
+
+function exportSalidasCSV(){
+  const lines = [SAL_HEADERS.join(';')];
+  salRows().forEach(row=>{
+    lines.push(row.map(v => String(v??'').replace(/;/g,',')).join(';'));
   });
   const blob = new Blob(['\uFEFF'+lines.join('\r\n')], {type:'text/csv;charset=utf-8;'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `salidas_BETA_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download = nombreArchivoSalidas('csv');
   a.click();
   URL.revokeObjectURL(url);
-});
+}
+
+function exportSalidasExcel(){
+  const rows = [];
+  salidas.forEach(s=>{
+    s.items.forEach(it=>{
+      rows.push({
+        'Fecha': s.fecha, 'Cliente': s.cliente, 'Serie Equipo': s.serie, 'Técnico': s.tecnico,
+        'Registrado por': s.registrador, 'Razón': s.razon, 'P/N': it.pn, 'Descripción': it.desc,
+        'Cantidad': it.qty, 'SAP': s.sapDescontado ? 'Sí' : 'No'
+      });
+    });
+  });
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = [10,18,14,16,16,18,10,30,9,7].map(w=>({wch:w}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Salidas');
+  XLSX.writeFile(wb, nombreArchivoSalidas('xlsx'));
+}
+
+function exportSalidasPDF(){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation:'landscape', unit:'pt', format:'a4' });
+  doc.setFont('helvetica','bold'); doc.setFontSize(14);
+  doc.text('Historial de Salidas · Panel BETA', 28, 28);
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(100);
+  doc.text(`Generado: ${new Date().toLocaleString('es-PA')}`, 28, 42);
+  doc.autoTable({
+    head: [SAL_HEADERS],
+    body: salRows(),
+    startY: 54,
+    styles: { fontSize: 7, cellPadding: 4 },
+    headStyles: { fillColor: [31,111,110], textColor: 255 },
+    alternateRowStyles: { fillColor: [246,243,234] },
+    margin: { left: 28, right: 28 }
+  });
+  doc.save(nombreArchivoSalidas('pdf'));
+}
+
+document.getElementById('historyExportCsvBtn').addEventListener('click', ()=>{ exportSalidasCSV(); closeExportMenus(); });
+document.getElementById('historyExportExcelBtn').addEventListener('click', ()=>{ exportSalidasExcel(); closeExportMenus(); });
+document.getElementById('historyExportPdfBtn').addEventListener('click', ()=>{ exportSalidasPDF(); closeExportMenus(); });
 
 /* ============ STATS ============ */
 function renderStats(){
@@ -2261,26 +2371,91 @@ document.getElementById('nuevoRepuestoSubmitBtn').addEventListener('click', asyn
   closeModal(nuevoRepuestoOverlay);
 });
 
-/* ============ EXPORTAR CSV ============ */
-document.getElementById('exportBtn').addEventListener('click', ()=>{
-  const headers = ['Hoja Origen','P/N','Description','UBICACIÓN','Unit','QTY','U/Price','Amount USD','EN STOCK','COSTO TOTAL INVENTARIO','ULTIMO CONTEO','Estado Stock'];
-  const lines = [headers.join(';')];
-  data.forEach(d=>{
-    const row = [
-      d.hoja, d.pn, d.desc, d.ubicacion, d.unit,
-      d.qty, `B/.${d.uprice.toFixed(2)}`, `B/.${d.amount.toFixed(2)}`,
-      d.enstock, `B/.${d.costo_total.toFixed(2)}`, d.ultimo_conteo, d.estadoNorm
-    ].map(v => String(v??'').replace(/;/g,','));
-    lines.push(row.join(';'));
+/* ============ EXPORTAR INVENTARIO: CSV / EXCEL / PDF ============ */
+const INV_HEADERS = ['Hoja Origen','P/N','Description','UBICACIÓN','Unit','QTY','U/Price','Amount USD','EN STOCK','COSTO TOTAL INVENTARIO','ULTIMO CONTEO','Estado Stock'];
+
+function invRows(){
+  return data.map(d=>[
+    d.hoja, d.pn, d.desc, d.ubicacion, d.unit,
+    d.qty, `B/.${d.uprice.toFixed(2)}`, `B/.${d.amount.toFixed(2)}`,
+    d.enstock, `B/.${d.costo_total.toFixed(2)}`, d.ultimo_conteo, d.estadoNorm
+  ]);
+}
+
+function nombreArchivoInventario(ext){
+  return `inventario_BETA_${new Date().toISOString().slice(0,10)}.${ext}`;
+}
+
+function exportInventarioCSV(){
+  const lines = [INV_HEADERS.join(';')];
+  invRows().forEach(row=>{
+    lines.push(row.map(v => String(v??'').replace(/;/g,',')).join(';'));
   });
   const blob = new Blob(['\uFEFF'+lines.join('\r\n')], {type:'text/csv;charset=utf-8;'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `inventario_BETA_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download = nombreArchivoInventario('csv');
   a.click();
   URL.revokeObjectURL(url);
-});
+}
+
+function exportInventarioExcel(){
+  const rows = data.map(d=>({
+    'Hoja Origen': d.hoja, 'P/N': d.pn, 'Description': d.desc, 'UBICACIÓN': d.ubicacion,
+    'Unit': d.unit, 'QTY': d.qty, 'U/Price': d.uprice, 'Amount USD': d.amount,
+    'EN STOCK': d.enstock, 'COSTO TOTAL INVENTARIO': d.costo_total,
+    'ULTIMO CONTEO': d.ultimo_conteo, 'Estado Stock': d.estadoNorm
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = [8,10,32,14,7,7,9,11,9,14,12,12].map(w=>({wch:w}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Inventario');
+  XLSX.writeFile(wb, nombreArchivoInventario('xlsx'));
+}
+
+function exportInventarioPDF(){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation:'landscape', unit:'pt', format:'a4' });
+  doc.setFont('helvetica','bold'); doc.setFontSize(14);
+  doc.text('Inventario · Panel BETA', 28, 28);
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(100);
+  doc.text(`Generado: ${new Date().toLocaleString('es-PA')}`, 28, 42);
+  doc.autoTable({
+    head: [INV_HEADERS],
+    body: invRows(),
+    startY: 54,
+    styles: { fontSize: 7, cellPadding: 4 },
+    headStyles: { fillColor: [184,104,26], textColor: 255 },
+    alternateRowStyles: { fillColor: [246,243,234] },
+    margin: { left: 28, right: 28 }
+  });
+  doc.save(nombreArchivoInventario('pdf'));
+}
+
+document.getElementById('exportCsvBtn').addEventListener('click', ()=>{ exportInventarioCSV(); closeExportMenus(); });
+document.getElementById('exportExcelBtn').addEventListener('click', ()=>{ exportInventarioExcel(); closeExportMenus(); });
+document.getElementById('exportPdfBtn').addEventListener('click', ()=>{ exportInventarioPDF(); closeExportMenus(); });
+
+/* ============ MENÚS DESPLEGABLES DE EXPORTACIÓN (genérico) ============ */
+function closeExportMenus(){
+  document.querySelectorAll('.export-menu.open').forEach(m=>m.classList.remove('open'));
+}
+function wireExportMenu(btnId, menuId){
+  const btn = document.getElementById(btnId);
+  const menu = document.getElementById(menuId);
+  if(!btn || !menu) return;
+  btn.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const willOpen = !menu.classList.contains('open');
+    closeExportMenus();
+    if(willOpen) menu.classList.add('open');
+  });
+}
+wireExportMenu('exportBtn', 'exportMenu');
+wireExportMenu('historyExportBtn', 'historyExportMenu');
+document.addEventListener('click', closeExportMenus);
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeExportMenus(); });
 
 /* ============ FILTROS Y ORDEN ============ */
 document.getElementById('searchInput').addEventListener('input', e=>{
